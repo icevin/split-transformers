@@ -651,28 +651,15 @@ class YolosModel(YolosPreTrainedModel):
 
         if pixel_values is None and not self.is_server:
             raise ValueError("You have to specify pixel_values")
-
-        start_time = time.monotonic()
         if not self.is_server or self.is_client:
-            print(f"pixels.size: {sys.getsizeof(pixel_values)}")
-            start_time = time.monotonic()
-
             # Prepare head mask if needed
             # 1.0 in head_mask indicate we keep the head
             # attention_probs has shape bsz x n_heads x N x N
             # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
             # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
             head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
-
-            elapsed = time.monotonic() - start_time
-            print(f"get_head_mask: {elapsed}")
-            start_time = time.monotonic()
             embedding_output = self.embeddings(pixel_values)
-            elapsed = time.monotonic() - start_time
 
-            print(f"embeddings.size: {sys.getsizeof(embedding_output)}")
-            print(f"embeddings: {elapsed}")
-            start_time = time.monotonic()
 
         if self.is_client:
             return embedding_output
@@ -701,23 +688,11 @@ class YolosModel(YolosPreTrainedModel):
                     return_dict=return_dict,
                 )
 
-            elapsed = time.monotonic() - start_time
-            print(f"encoder: {elapsed}")
-            start_time = time.monotonic()
             sequence_output = encoder_outputs[0]
-            print(f"encoder_outputs.size: {sys.getsizeof(sequence_output)}")
-
-            start_time = time.monotonic()
             sequence_output = self.layernorm(sequence_output)
 
-            elapsed = time.monotonic() - start_time
-            print(f"layernorm: {elapsed}")
-            start_time = time.monotonic()
             pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
-            elapsed = time.monotonic() - start_time
-            print(f"pooler: {elapsed}")
-            start_time = time.monotonic()
             if not return_dict:
                 head_outputs = (sequence_output, pooled_output) if pooled_output is not None else (sequence_output,)
                 return head_outputs + encoder_outputs[1:]
@@ -839,8 +814,6 @@ class YolosForObjectDetection(YolosPreTrainedModel):
         Detected cat with confidence 0.914 at location [342.34, 21.48, 638.64, 372.46]
         ```"""
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        start_time = time.monotonic()
         # First, sent images through YOLOS base model to obtain hidden states
 
         if not self.isServer or self.isClient:
@@ -858,29 +831,14 @@ class YolosForObjectDetection(YolosPreTrainedModel):
         sequence_output = outputs[0]
 
 
-        elapsed = time.monotonic() - start_time
-        print(f"vit: {elapsed}")
-        start_time = time.monotonic()
-
-        print(sys.getsizeof(pixel_values))
-        print(sys.getsizeof(outputs))
-
         # Take the final hidden states of the detection tokens
         sequence_output = sequence_output[:, -self.config.num_detection_tokens :, :]
 
-        print(sys.getsizeof(sequence_output))
         # Class logits + predicted bounding boxes
         logits = self.class_labels_classifier(sequence_output)
 
-        elapsed = time.monotonic() - start_time
-        print(f"class_labels_classifier: {elapsed}")
-        start_time = time.monotonic()
 
         pred_boxes = self.bbox_predictor(sequence_output).sigmoid()
-
-        elapsed = time.monotonic() - start_time
-        print(f"bbox: {elapsed}")
-        start_time = time.monotonic()
 
         loss, loss_dict, auxiliary_outputs = None, None, None
         if labels is not None:
