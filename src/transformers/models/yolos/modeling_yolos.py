@@ -14,6 +14,7 @@
 # limitations under the License.
 """ PyTorch YOLOS model."""
 
+import sys, time, os
 
 import collections.abc
 import math
@@ -595,10 +596,11 @@ YOLOS_INPUTS_DOCSTRING = r"""
     YOLOS_START_DOCSTRING,
 )
 class YolosModel(YolosPreTrainedModel):
-    def __init__(self, config: YolosConfig, add_pooling_layer: bool = True):
+    def __init__(self, config: YolosConfig, add_pooling_layer: bool = True, is_client=False, is_server=False):
         super().__init__(config)
         self.config = config
-
+        self.is_client = is_client
+        self.is_server = is_server
         self.embeddings = YolosEmbeddings(config)
         self.encoder = YolosEncoder(config)
 
@@ -637,48 +639,95 @@ class YolosModel(YolosPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, BaseModelOutputWithPooling]:
+        input_embeddings=None,
+        p_height=None,
+        p_width=None
+    ):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if pixel_values is None:
+        if pixel_values is None and not self.is_server:
             raise ValueError("You have to specify pixel_values")
 
-        # Prepare head mask if needed
-        # 1.0 in head_mask indicate we keep the head
-        # attention_probs has shape bsz x n_heads x N x N
-        # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
-        # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
-        head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
+        start_time = time.monotonic()
+        if not self.is_server or self.is_client:
+            print(f"pixels.size: {sys.getsizeof(pixel_values)}")
+            start_time = time.monotonic()
 
-        embedding_output = self.embeddings(pixel_values)
+            # Prepare head mask if needed
+            # 1.0 in head_mask indicate we keep the head
+            # attention_probs has shape bsz x n_heads x N x N
+            # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
+            # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
+            head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
-        encoder_outputs = self.encoder(
-            embedding_output,
-            height=pixel_values.shape[-2],
-            width=pixel_values.shape[-1],
-            head_mask=head_mask,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        sequence_output = encoder_outputs[0]
-        sequence_output = self.layernorm(sequence_output)
-        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
+            elapsed = time.monotonic() - start_time
+            print(f"get_head_mask: {elapsed}")
+            start_time = time.monotonic()
+            embedding_output = self.embeddings(pixel_values)
+            elapsed = time.monotonic() - start_time
 
-        if not return_dict:
-            head_outputs = (sequence_output, pooled_output) if pooled_output is not None else (sequence_output,)
-            return head_outputs + encoder_outputs[1:]
+            print(f"embeddings.size: {sys.getsizeof(embedding_output)}")
+            print(f"embeddings: {elapsed}")
+            start_time = time.monotonic()
 
-        return BaseModelOutputWithPooling(
-            last_hidden_state=sequence_output,
-            pooler_output=pooled_output,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
-        )
+        if self.is_client:
+            return embedding_output
+
+        if not self.is_client:
+            if self.is_server:
+                embedding_output = input_embeddings
+                print('server loaded input embeddings')
+                encoder_outputs = self.encoder(
+                    embedding_output,
+                    height=p_height,
+                    width=p_width,
+                    head_mask=head_mask,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+            else:
+                encoder_outputs = self.encoder(
+                    embedding_output,
+                    height=pixel_values.shape[-2],
+                    width=pixel_values.shape[-1],
+                    head_mask=head_mask,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+
+            elapsed = time.monotonic() - start_time
+            print(f"encoder: {elapsed}")
+            start_time = time.monotonic()
+            sequence_output = encoder_outputs[0]
+            print(f"encoder_outputs.size: {sys.getsizeof(sequence_output)}")
+
+            start_time = time.monotonic()
+            sequence_output = self.layernorm(sequence_output)
+
+            elapsed = time.monotonic() - start_time
+            print(f"layernorm: {elapsed}")
+            start_time = time.monotonic()
+            pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
+
+            elapsed = time.monotonic() - start_time
+            print(f"pooler: {elapsed}")
+            start_time = time.monotonic()
+            if not return_dict:
+                head_outputs = (sequence_output, pooled_output) if pooled_output is not None else (sequence_output,)
+                return head_outputs + encoder_outputs[1:]
+
+            return BaseModelOutputWithPooling(
+                last_hidden_state=sequence_output,
+                pooler_output=pooled_output,
+                hidden_states=encoder_outputs.hidden_states,
+                attentions=encoder_outputs.attentions,
+            )
 
 
 class YolosPooler(nn.Module):
@@ -705,9 +754,11 @@ class YolosPooler(nn.Module):
 class YolosForObjectDetection(YolosPreTrainedModel):
     def __init__(self, config: YolosConfig):
         super().__init__(config)
-
+        self.isClient = (os.getenv('YOLO_MODE') == 'CLIENT')
+        self.isServer = (os.getenv('YOLO_MODE') == 'SERVER')
+        print(self.isClient, self.isServer)
         # YOLOS (ViT) encoder model
-        self.vit = YolosModel(config, add_pooling_layer=False)
+        self.vit = YolosModel(config, add_pooling_layer=False, is_client=self.isClient, is_server=self.isServer)
 
         # Object detection heads
         # We add one for the "no object" class
@@ -738,7 +789,10 @@ class YolosForObjectDetection(YolosPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, YolosObjectDetectionOutput]:
+        input_embeddings=None,
+        p_height=None,
+        p_width=None
+    ):
         r"""
         labels (`List[Dict]` of len `(batch_size,)`, *optional*):
             Labels for computing the bipartite matching loss. List of dicts, each dictionary containing at least the
@@ -786,22 +840,47 @@ class YolosForObjectDetection(YolosPreTrainedModel):
         ```"""
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        start_time = time.monotonic()
         # First, sent images through YOLOS base model to obtain hidden states
-        outputs = self.vit(
-            pixel_values,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+
+        if not self.isServer or self.isClient:
+            outputs = self.vit(
+                pixel_values,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+            if self.isClient:
+                return outputs
+        if self.isServer:
+            outputs = self.vit(pixel_values, input_embeddings=input_embeddings, p_height=p_height, p_width=p_width)
 
         sequence_output = outputs[0]
+
+
+        elapsed = time.monotonic() - start_time
+        print(f"vit: {elapsed}")
+        start_time = time.monotonic()
+
+        print(sys.getsizeof(pixel_values))
+        print(sys.getsizeof(outputs))
 
         # Take the final hidden states of the detection tokens
         sequence_output = sequence_output[:, -self.config.num_detection_tokens :, :]
 
+        print(sys.getsizeof(sequence_output))
         # Class logits + predicted bounding boxes
         logits = self.class_labels_classifier(sequence_output)
+
+        elapsed = time.monotonic() - start_time
+        print(f"class_labels_classifier: {elapsed}")
+        start_time = time.monotonic()
+
         pred_boxes = self.bbox_predictor(sequence_output).sigmoid()
+
+        elapsed = time.monotonic() - start_time
+        print(f"bbox: {elapsed}")
+        start_time = time.monotonic()
 
         loss, loss_dict, auxiliary_outputs = None, None, None
         if labels is not None:
